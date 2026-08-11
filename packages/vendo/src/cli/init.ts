@@ -2086,7 +2086,7 @@ export async function runInit(input: InitOptions): Promise<number> {
     await emitEnding({
       root, options, output, useCase, framework: plan.framework, keptUncertain,
       wrote: [...planned, ...changes.map((change) => change.path)],
-      pendingLoosenings: flow.judged.queued,
+      pendingLoosenings: flow.judged.looseningsQueued ?? 0,
       serviceAuthUnwired: mcp?.serviceAuthUnwired === true,
       signIn: mcp?.signIn ?? null,
       judged: flow.judged.ran,

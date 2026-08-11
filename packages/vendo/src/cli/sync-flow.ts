@@ -120,15 +120,22 @@ async function withSpin<T>(
   }
 }
 
+/** What the judgment pass handed back — `ran` means the pass was invoked;
+ *  the tallies are present only when it returned `status: "judged"`, so a
+ *  zero-finding judgment is distinguishable from a keyless structural-only
+ *  run in the sync footer (#1174). */
+export interface SyncFlowJudged {
+  ran: boolean;
+  engine?: "claude" | "codex" | "npx-engine";
+  hardened?: number;
+  schemasInferred?: number;
+  looseningsApproved?: number;
+  looseningsQueued?: number;
+}
+
 export interface SyncFlowResult {
   report: SyncReportWithWarnings;
-  judged: {
-    ran: boolean;
-    engine?: "claude" | "codex" | "npx-engine";
-    /** Loosening proposals held as PENDING — never applied, waiting for a human
-        (`vendo sync --review`). init reports the count in its closing facts. */
-    queued: number;
-  };
+  judged: SyncFlowJudged;
   /** The theme re-scan: which slots this run took from the host, and which the
    *  host disagrees with but a human owns. null = nothing to reconcile (the
    *  file was just created, or there is none). */
@@ -615,7 +622,7 @@ async function runGradingStages(input: {
 }): Promise<{ judged: SyncFlowResult["judged"]; themeDraft: SyncFlowResult["themeDraft"] }> {
   const { root, vendoDir, mode, env, options, output, themeSummary } = input;
   const { note, noteError } = input.notes;
-  const judged: SyncFlowResult["judged"] = { ran: false, queued: 0 };
+  const judged: SyncFlowResult["judged"] = { ran: false };
   let themeDraft: SyncFlowResult["themeDraft"] = null;
   const selection = await chooseEngine(options, env, note);
   if (selection.skip) return { judged, themeDraft };
@@ -662,12 +669,20 @@ async function runGradingStages(input: {
     // The pass already printed the count and `vendo sync --review`; say WHY
     // they were held, so an unattended caller doesn't read it as a refusal.
     if (loosenings === "queue" && pass.status === "judged" && pass.queued > 0) {
-      judged.queued = pass.queued;
       note("  (held, not applied: a loosening needs a human — review them with `vendo sync --review`)");
     }
     judged.ran = true;
     const engine = selection.engine === undefined ? undefined : ENGINE_BY_HARNESS_ID[selection.engine.harness.id];
     if (engine !== undefined) judged.engine = engine;
+    // Tallies ride on the result only for a real judgment — structural-only /
+    // up-to-date leave them unset so the footer can tell those apart from a
+    // judged run that found nothing to harden (#1174).
+    if (pass.status === "judged") {
+      judged.hardened = pass.hardened;
+      judged.schemasInferred = pass.schemasInferred;
+      judged.looseningsApproved = pass.approved;
+      judged.looseningsQueued = pass.queued;
+    }
   } catch (error) {
     note(`judgment failed soft: ${error instanceof Error ? error.message : "unknown error"}`);
     judged.ran = false;
