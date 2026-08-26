@@ -1019,7 +1019,7 @@ describe("sync --full writes the theme fill it paid for", () => {
 /** Minimal flow result for the footer formatter — only the fields `whatMoved` reads. */
 function flowForFooter(overrides: {
   tools?: Partial<SyncFlowResult["report"]["tools"]>;
-  judged?: SyncFlowResult["judged"];
+  judged?: Partial<SyncFlowResult["judged"]>;
   baselines?: SyncFlowResult["baselines"];
   components?: SyncFlowResult["components"];
 }): SyncFlowResult {
@@ -1034,7 +1034,7 @@ function flowForFooter(overrides: {
       components: { captured: [], drifted: [] },
       warnings: [],
     },
-    judged: overrides.judged ?? { ran: false },
+    judged: { ran: false, queued: 0, ...overrides.judged },
     theme: null,
     themeSummary: null,
     themeDraft: null,
@@ -1057,7 +1057,7 @@ describe("sync footer whatMoved (#1174)", () => {
         hardened: 8,
         schemasInferred: 0,
         looseningsApproved: 0,
-        looseningsQueued: 2,
+        queued: 2,
       },
       baselines: { pushed: ["a"], pruned: [] },
     }))).toBe("+1 tool · ~1 changed · 8 fields hardened · pushed to Cloud · 2 loosenings queued");
@@ -1071,7 +1071,7 @@ describe("sync footer whatMoved (#1174)", () => {
         hardened: 0,
         schemasInferred: 3,
         looseningsApproved: 2,
-        looseningsQueued: 0,
+        queued: 0,
       },
       components: { pushed: ["Button"], pruned: [], modules: { uploaded: 0, deleted: 0 } },
     }))).toBe("+2 tools · 3 schemas inferred · 2 loosenings applied · pushed to Cloud");
@@ -1085,7 +1085,7 @@ describe("sync footer whatMoved (#1174)", () => {
         hardened: 0,
         schemasInferred: 0,
         looseningsApproved: 0,
-        looseningsQueued: 0,
+        queued: 0,
       },
     }))).toBe("+1 tool · ~1 changed · 0 findings");
 

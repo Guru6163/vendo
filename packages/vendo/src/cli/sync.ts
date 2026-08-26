@@ -178,7 +178,7 @@ export function whatMoved(flow: SyncFlowResult): string | undefined {
   // Non-zero ones speak for themselves; a judged run with none still says
   // "0 findings" — count-style like its neighbors, not a bare adjective — so
   // it cannot read as a keyless structural-only footer (#1174).
-  const { hardened, schemasInferred, looseningsApproved, looseningsQueued } = flow.judged;
+  const { hardened, schemasInferred, looseningsApproved, queued } = flow.judged;
   const wasJudged = hardened !== undefined;
   let judgmentSaid = false;
   if (hardened !== undefined && hardened > 0) {
@@ -193,7 +193,7 @@ export function whatMoved(flow: SyncFlowResult): string | undefined {
     moved.push(`${looseningsApproved} loosening${looseningsApproved === 1 ? "" : "s"} applied`);
     judgmentSaid = true;
   }
-  if (wasJudged && !judgmentSaid && (looseningsQueued ?? 0) === 0) {
+  if (wasJudged && !judgmentSaid && queued === 0) {
     moved.push("0 findings");
   }
 
@@ -201,8 +201,8 @@ export function whatMoved(flow: SyncFlowResult): string | undefined {
     moved.push("pushed to Cloud");
   }
   // Queued loosenings need the user later — last fragment they read.
-  if (looseningsQueued !== undefined && looseningsQueued > 0) {
-    moved.push(`${looseningsQueued} loosening${looseningsQueued === 1 ? "" : "s"} queued`);
+  if (queued > 0) {
+    moved.push(`${queued} loosening${queued === 1 ? "" : "s"} queued`);
   }
   return moved.length === 0 ? undefined : moved.join(" · ");
 }

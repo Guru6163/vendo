@@ -109,7 +109,7 @@ describe("the loosening review never blocks an unattended run", () => {
     expect(result.judged.ran).toBe(true);
     // Tallies surface onto the flow so the sync footer can report them (#1174).
     expect(result.judged).toMatchObject({
-      looseningsQueued: 2,
+      queued: 2,
       looseningsApproved: 0,
       hardened: 0,
       schemasInferred: 0,
@@ -147,7 +147,7 @@ describe("the loosening review never blocks an unattended run", () => {
     });
     expect(result.judged.ran).toBe(true);
     expect(result.judged.hardened).toBeUndefined();
-    expect(result.judged.looseningsQueued).toBeUndefined();
+    expect(result.judged.queued).toBe(0);
   });
 
   it("still reviews inline when a human is actually there", async () => {

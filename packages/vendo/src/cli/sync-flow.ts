@@ -123,14 +123,17 @@ async function withSpin<T>(
 /** What the judgment pass handed back — `ran` means the pass was invoked;
  *  the tallies are present only when it returned `status: "judged"`, so a
  *  zero-finding judgment is distinguishable from a keyless structural-only
- *  run in the sync footer (#1174). */
+ *  run in the sync footer (#1174). `queued` is always a count (0 when none
+ *  are held) because init's closing facts read it. */
 export interface SyncFlowJudged {
   ran: boolean;
   engine?: "claude" | "codex" | "npx-engine";
+  /** Loosening proposals held as PENDING — never applied, waiting for a human
+      (`vendo sync --review`). init reports the count in its closing facts. */
+  queued: number;
   hardened?: number;
   schemasInferred?: number;
   looseningsApproved?: number;
-  looseningsQueued?: number;
 }
 
 export interface SyncFlowResult {
@@ -622,7 +625,7 @@ async function runGradingStages(input: {
 }): Promise<{ judged: SyncFlowResult["judged"]; themeDraft: SyncFlowResult["themeDraft"] }> {
   const { root, vendoDir, mode, env, options, output, themeSummary } = input;
   const { note, noteError } = input.notes;
-  const judged: SyncFlowResult["judged"] = { ran: false };
+  const judged: SyncFlowResult["judged"] = { ran: false, queued: 0 };
   let themeDraft: SyncFlowResult["themeDraft"] = null;
   const selection = await chooseEngine(options, env, note);
   if (selection.skip) return { judged, themeDraft };
@@ -681,7 +684,7 @@ async function runGradingStages(input: {
       judged.hardened = pass.hardened;
       judged.schemasInferred = pass.schemasInferred;
       judged.looseningsApproved = pass.approved;
-      judged.looseningsQueued = pass.queued;
+      judged.queued = pass.queued;
     }
   } catch (error) {
     note(`judgment failed soft: ${error instanceof Error ? error.message : "unknown error"}`);
