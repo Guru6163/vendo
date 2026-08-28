@@ -13,6 +13,7 @@
  * It decides nothing about how to think. Every value below is a façade or a gate.
  */
 import {
+  STORE_WIRE_APPEND_MESSAGES_OPS,
   STORE_WIRE_TURN_OPS,
   isVendoError,
   VendoError,
@@ -591,10 +592,38 @@ export function createHarnessTurns(config: HarnessTurnsConfig): HarnessTurns {
     }
   };
 
+  /** Best-effort: a denied turn that moved a drop and then failed to write the
+   *  transcript must not leave the file under the thread with no message
+   *  pointing at it. Staging already erased the original, so this is a delete,
+   *  not a move back. */
+  const dropHomedFiles = async (paths: string[], ctx: RunContext): Promise<void> => {
+    if (paths.length === 0) return;
+    try {
+      const workspace = await sqlDoors().workspaces.open(ctx.principal);
+      for (const path of paths) await workspace.rm(path, { force: true });
+      await workspace.commit();
+      for (const path of paths) await eraseStagedFile(ctx, path);
+    } catch {
+      // Already a failed write; the card still streams.
+    }
+  };
+
+  /** `upsertMany` is one transaction on SQL and on a mount that serves
+   *  `transcripts.appendMessages`. Older StoreOps mounts fall through to two
+   *  `putMessage` calls, which can land the user bubble without the card. */
+  const pairWriteIsAtomic = async (): Promise<boolean> => {
+    if (maybeDbFor(config.store) !== undefined) return true;
+    if (config.ops?.transcripts.appendMessages === undefined) return false;
+    try {
+      return (await config.ops.status()).ops >= STORE_WIRE_APPEND_MESSAGES_OPS;
+    } catch {
+      return false;
+    }
+  };
+
   /** The question and the card, written the same way an ordinary turn writes:
-   *  a staged drop comes home first, then the pair lands through `upsertMany`
-   *  when the store has it (`persist` is the fallback that creates the row).
-   *  No model call. */
+   *  a staged drop comes home first, then the pair lands in one write. No model
+   *  call. */
   const persistDeniedMessage = async (
     input: { threadId?: string; message: UIMessage; ctx: RunContext },
     verdict: { message?: string; retryable?: true },
@@ -605,6 +634,9 @@ export function createHarnessTurns(config: HarnessTurnsConfig): HarnessTurns {
     }
     const thread = await threads.resolve(given as ThreadId | undefined, input.ctx);
     const fresh = thread.messages.length === 0;
+    const priorFileUrls = new Set(
+      input.message.parts.flatMap((part) => part.type === "file" ? [part.url] : []),
+    );
     const message = await rehomeStagedFiles(input.message, thread.id, input.ctx);
     validateUpsert(thread.messages, message);
     const assistant: UIMessage = {
@@ -612,26 +644,34 @@ export function createHarnessTurns(config: HarnessTurnsConfig): HarnessTurns {
       role: "assistant",
       parts: [limitCardPart(verdict) as UIMessage["parts"][number]],
     };
-    // Same split an ordinary turn uses: `persist` creates the row (and is the
-    // fallback when the batch verb is absent); once the row exists, the
-    // transcript door's `upsertMany` is the writer. A turn-capable store
-    // without `records.atomic` would throw here if we always went through
-    // the repository.
+    const homed = message.parts.flatMap((part) =>
+      part.type === "file" && !priorFileUrls.has(part.url) ? [part.url] : [],
+    );
+    // `persist` is the pair write (CAS of the whole transcript). `upsertMany`
+    // is used only where that verb is itself one transaction — a SQL store, or
+    // a mount that serves `transcripts.appendMessages`. A turn-capable store
+    // without `records.atomic` still needs the batch verb; an older mount
+    // without it must not split the pair across two `putMessage` calls.
     let batchAppend: ReturnType<typeof sqlDoors>["transcript"]["upsertMany"] | undefined;
     try {
       batchAppend = sqlDoors().transcript.upsertMany;
     } catch (error) {
       if (!isVendoError(error) || error.code !== "not-implemented") throw error;
     }
-    if (fresh || batchAppend === undefined) {
-      await threads.persist(thread, [message, assistant], { fresh });
-    } else {
-      await batchAppend(
-        input.ctx.principal,
-        thread.id,
-        [message, assistant],
-        { title: deriveTitle([...thread.messages, message]) },
-      );
+    try {
+      if (fresh || batchAppend === undefined || !await pairWriteIsAtomic()) {
+        await threads.persist(thread, [message, assistant], { fresh });
+      } else {
+        await batchAppend(
+          input.ctx.principal,
+          thread.id,
+          [message, assistant],
+          { title: deriveTitle([...thread.messages, message]) },
+        );
+      }
+    } catch (error) {
+      await dropHomedFiles(homed, input.ctx);
+      throw error;
     }
     return thread.id;
   };
