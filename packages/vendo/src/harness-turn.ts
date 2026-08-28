@@ -591,8 +591,10 @@ export function createHarnessTurns(config: HarnessTurnsConfig): HarnessTurns {
     }
   };
 
-  /** The question and the card, written the same way a first turn writes, so
-   *  GET /threads/:id (a reload) reads them back. No model call. */
+  /** The question and the card, written the same way an ordinary turn writes:
+   *  a staged drop comes home first, then the pair lands through `upsertMany`
+   *  when the store has it (`persist` is the fallback that creates the row).
+   *  No model call. */
   const persistDeniedMessage = async (
     input: { threadId?: string; message: UIMessage; ctx: RunContext },
     verdict: { message?: string; retryable?: true },
@@ -602,13 +604,35 @@ export function createHarnessTurns(config: HarnessTurnsConfig): HarnessTurns {
       throw new VendoError("validation", "threadId is malformed");
     }
     const thread = await threads.resolve(given as ThreadId | undefined, input.ctx);
-    validateUpsert(thread.messages, input.message);
+    const fresh = thread.messages.length === 0;
+    const message = await rehomeStagedFiles(input.message, thread.id, input.ctx);
+    validateUpsert(thread.messages, message);
     const assistant: UIMessage = {
       id: `msg_${globalThis.crypto.randomUUID()}`,
       role: "assistant",
       parts: [limitCardPart(verdict) as UIMessage["parts"][number]],
     };
-    await threads.persist(thread, [input.message, assistant], { fresh: thread.messages.length === 0 });
+    // Same split an ordinary turn uses: `persist` creates the row (and is the
+    // fallback when the batch verb is absent); once the row exists, the
+    // transcript door's `upsertMany` is the writer. A turn-capable store
+    // without `records.atomic` would throw here if we always went through
+    // the repository.
+    let batchAppend: ReturnType<typeof sqlDoors>["transcript"]["upsertMany"] | undefined;
+    try {
+      batchAppend = sqlDoors().transcript.upsertMany;
+    } catch (error) {
+      if (!isVendoError(error) || error.code !== "not-implemented") throw error;
+    }
+    if (fresh || batchAppend === undefined) {
+      await threads.persist(thread, [message, assistant], { fresh });
+    } else {
+      await batchAppend(
+        input.ctx.principal,
+        thread.id,
+        [message, assistant],
+        { title: deriveTitle([...thread.messages, message]) },
+      );
+    }
     return thread.id;
   };
 

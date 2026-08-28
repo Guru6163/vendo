@@ -125,6 +125,36 @@ describe("the message choke — a denied message costs nothing", () => {
     });
   });
 
+  it("homes a staged drop on a denied turn, so a reload still opens the file", async () => {
+    const { vendo } = await compose({ limits: () => false, turns: [] });
+    const staged = await vendo.harness.stageUpload({
+      principal,
+      name: "ledger.csv",
+      content: "jan,1\n",
+    });
+    const ctx = { principal, venue: "chat" as const, presence: "present" as const, sessionId: "s_limits" };
+    const response = await vendo.handler(new Request("https://host.test/api/vendo/threads", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        threadId: "thr_limits",
+        message: {
+          id: "m_file",
+          role: "user",
+          parts: [
+            { type: "text", text: "what is in this?" },
+            { type: "file", mediaType: "text/csv", filename: "ledger.csv", url: staged.path },
+          ],
+        },
+      }),
+    }));
+    expect(limitCards(await readSse(response))).toEqual([{ type: "data-vendo-limit" }]);
+    const stored = await vendo.harness.threads.get("thr_limits", ctx);
+    const file = stored?.messages[0]?.parts.find((part) => part.type === "file") as { url?: string } | undefined;
+    expect(file?.url).toBe("/user/threads/thr_limits/files/ledger.csv");
+    expect(await (await vendo.harness.workspace(principal)).readFile(file!.url!)).toBe("jan,1\n");
+  });
+
   it("says nothing of its own when the policy gave no sentence", async () => {
     const { chat } = await compose({ limits: () => false, turns: [] });
 
