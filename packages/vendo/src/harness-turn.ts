@@ -20,6 +20,7 @@ import {
   emitUsage,
   hostSkillFiles,
   isUnattended,
+  log,
   situationPromptBlock,
   toVendoWirePart,
   WARM_THREAD_PREFIX,
@@ -302,20 +303,29 @@ function modelFamilyOf(models: ResolvedModels<LanguageModel>): string | null {
   return typeof id === "string" ? id : null;
 }
 
-/** The whole of a message the host's policy refused: the card the chat surface
- *  renders, and nothing else. No thread row, no transcript, no model call — the
- *  point of the choke is that a denied message costs nothing. */
-const limitResponse = (verdict: { message?: string; retryable?: true }): Response => createUIMessageStreamResponse({
-  stream: createUIMessageStream<UIMessage>({
-    execute: ({ writer }) => {
-      writer.write(toVendoWirePart({
-        type: "data-vendo-limit",
-        ...(verdict.message === undefined ? {} : { message: verdict.message }),
-        ...(verdict.retryable === undefined ? {} : { retryable: verdict.retryable }),
-      }) as never);
-    },
-  }),
+/** The card a refused message streams, nested in the wire envelope the chrome
+ *  and a persisted transcript both read. */
+const limitCardPart = (verdict: { message?: string; retryable?: true }) => toVendoWirePart({
+  type: "data-vendo-limit",
+  ...(verdict.message === undefined ? {} : { message: verdict.message }),
+  ...(verdict.retryable === undefined ? {} : { retryable: verdict.retryable }),
 });
+
+/** The live stream of a message the host's policy refused: the card the chat
+ *  surface renders. The same pair is persisted beside it so a reload can read
+ *  it back. No model call — the point of the choke is that a denied message
+ *  does not spend one. */
+const limitResponse = (verdict: { message?: string; retryable?: true }, threadId?: ThreadId): Response => {
+  const response = createUIMessageStreamResponse({
+    stream: createUIMessageStream<UIMessage>({
+      execute: ({ writer }) => {
+        writer.write(limitCardPart(verdict) as never);
+      },
+    }),
+  });
+  if (threadId !== undefined) response.headers.set(THREAD_ID_HEADER, threadId);
+  return response;
+};
 
 export function createHarnessTurns(config: HarnessTurnsConfig): HarnessTurns {
   const threads = new ThreadRepository(config.store);
@@ -581,6 +591,27 @@ export function createHarnessTurns(config: HarnessTurnsConfig): HarnessTurns {
     }
   };
 
+  /** The question and the card, written the same way a first turn writes, so
+   *  GET /threads/:id (a reload) reads them back. No model call. */
+  const persistDeniedMessage = async (
+    input: { threadId?: string; message: UIMessage; ctx: RunContext },
+    verdict: { message?: string; retryable?: true },
+  ): Promise<ThreadId> => {
+    const given = input.threadId;
+    if (given !== undefined && !isThreadId(given)) {
+      throw new VendoError("validation", "threadId is malformed");
+    }
+    const thread = await threads.resolve(given as ThreadId | undefined, input.ctx);
+    validateUpsert(thread.messages, input.message);
+    const assistant: UIMessage = {
+      id: `msg_${globalThis.crypto.randomUUID()}`,
+      role: "assistant",
+      parts: [limitCardPart(verdict) as UIMessage["parts"][number]],
+    };
+    await threads.persist(thread, [input.message, assistant], { fresh: thread.messages.length === 0 });
+    return thread.id;
+  };
+
   return {
     threads: {
       get: (id, ctx) => threads.get(id, ctx),
@@ -650,10 +681,25 @@ export function createHarnessTurns(config: HarnessTurnsConfig): HarnessTurns {
       const timings = createTurnTimings();
       validateMessage(input?.message);
       // The message choke (limits.ts owns the counting, the policy and the
-      // recording): asked BEFORE the thread is resolved, so a refused message
-      // costs no read, no write and no model call.
+      // recording): asked BEFORE the model is called, so a refused message
+      // spends no tokens. The question and the card ARE written, so a reload
+      // can still say why the assistant went quiet.
       const verdict = await config.limiter?.gate("message", input.ctx);
-      if (verdict?.allow === false) return limitResponse(verdict);
+      if (verdict?.allow === false) {
+        let threadId: ThreadId | undefined;
+        try {
+          threadId = await persistDeniedMessage(input, verdict);
+        } catch (error) {
+          if (isVendoError(error)) throw error;
+          log({
+            code: "vendo.limit_denial_not_persisted",
+            level: "error",
+            message: "[vendo] a denied message could not be written to the thread; the card still streams",
+            data: { error },
+          });
+        }
+        return limitResponse(verdict, threadId);
+      }
       // Assembled once, per turn, for WHOEVER thinks. The venue gate and the guard's
       // directions live in here, which is why it is composition's job and not the
       // harness's. Which discovery section it may promise is decided by what is
@@ -665,7 +711,7 @@ export function createHarnessTurns(config: HarnessTurnsConfig): HarnessTurns {
       // store below can change — so assembling it after the reads meant the turn
       // paid the store's wait and the guard's `directions` wait end to end.
       // Started after the limiter gate, not before: a refused message must still
-      // cost nothing.
+      // skip the model, even though the card is now persisted.
       const rail = discoveryRail(config.harness, config.connectorDiscovery);
       const systemRead = config.system(input.ctx, { discovery: rail });
       // A rejection is delivered where the prompt is awaited below; this only

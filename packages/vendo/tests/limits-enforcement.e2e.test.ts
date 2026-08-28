@@ -98,7 +98,7 @@ describe("the message choke — a denied message costs nothing", () => {
   it("turns the third message away with the host's sentence, before any model call", async () => {
     // Two turns scripted, and only two: a third model call is exhaustion, not a
     // pass.
-    const { model, chat } = await compose({ limits: twoMessages, turns: [textTurn("one"), textTurn("two")] });
+    const { vendo, model, chat } = await compose({ limits: twoMessages, turns: [textTurn("one"), textTurn("two")] });
 
     expect(limitCards(await chat("first"))).toEqual([]);
     expect(limitCards(await chat("second"))).toEqual([]);
@@ -108,6 +108,21 @@ describe("the message choke — a denied message costs nothing", () => {
     // THE POINT: the turn was refused at the door, so the provider was never
     // dialed at all.
     expect(model.calls).toBe(2);
+    // The question and the card were written through the real persist path, so
+    // GET /threads/:id (a reload) reads them back — no stub on either side.
+    const stored = await vendo.harness.threads.get("thr_limits", {
+      principal, venue: "chat", presence: "present", sessionId: "s_limits",
+    });
+    expect(stored?.messages.map((message) => message.role)).toEqual([
+      "user", "assistant", "user", "assistant", "user", "assistant",
+    ]);
+    const last = stored?.messages.at(-1);
+    expect(last?.role).toBe("assistant");
+    expect(last?.parts.some((part) => part.type === "data-vendo-limit")).toBe(true);
+    expect(stored?.messages.at(-2)).toMatchObject({
+      role: "user",
+      parts: [{ type: "text", text: "third" }],
+    });
   });
 
   it("says nothing of its own when the policy gave no sentence", async () => {
