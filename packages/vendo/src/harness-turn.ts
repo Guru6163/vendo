@@ -592,19 +592,64 @@ export function createHarnessTurns(config: HarnessTurnsConfig): HarnessTurns {
     }
   };
 
-  /** Best-effort: a denied turn that moved a drop and then failed to write the
-   *  transcript must not leave the file under the thread with no message
-   *  pointing at it. Staging already erased the original, so this is a delete,
-   *  not a move back. */
-  const dropHomedFiles = async (paths: string[], ctx: RunContext): Promise<void> => {
-    if (paths.length === 0) return;
-    try {
+  /** A denied turn that moved a drop and then failed to write the transcript
+   *  must not leave the file under the thread with no message pointing at it.
+   *  Delete first (retry once); if that still fails, move it back to staging so
+   *  the stray sweep can reclaim it. Never swallow — a leftover at the thread
+   *  path has no janitor. */
+  const dropHomedFiles = async (
+    homes: Map<string, string>,
+    ctx: RunContext,
+  ): Promise<void> => {
+    if (homes.size === 0) return;
+    const paths = [...homes.values()];
+    const remove = async (): Promise<void> => {
       const workspace = await sqlDoors().workspaces.open(ctx.principal);
       for (const path of paths) await workspace.rm(path, { force: true });
       await workspace.commit();
       for (const path of paths) await eraseStagedFile(ctx, path);
-    } catch {
-      // Already a failed write; the card still streams.
+    };
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        await remove();
+        return;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    try {
+      const workspace = await sqlDoors().workspaces.open(ctx.principal);
+      let moved = 0;
+      for (const [from, to] of homes) {
+        if (await workspace.exists(to)) {
+          await workspace.mv(to, from);
+          moved += 1;
+        }
+      }
+      if (moved === 0) {
+        log({
+          code: "vendo.limit_denial_file_not_reclaimed",
+          level: "error",
+          message: "[vendo] a denied turn left a rehomed file with no transcript row; the staging sweep cannot see it",
+          data: { error: lastError, paths },
+        });
+        return;
+      }
+      await workspace.commit();
+      log({
+        code: "vendo.limit_denial_file_restaged",
+        level: "error",
+        message: "[vendo] a denied turn could not delete a rehomed file; it was moved back to staging for the stray sweep",
+        data: { error: lastError },
+      });
+    } catch (error) {
+      log({
+        code: "vendo.limit_denial_file_not_reclaimed",
+        level: "error",
+        message: "[vendo] a denied turn left a rehomed file with no transcript row; the staging sweep cannot see it",
+        data: { error, paths },
+      });
     }
   };
 
@@ -634,9 +679,6 @@ export function createHarnessTurns(config: HarnessTurnsConfig): HarnessTurns {
     }
     const thread = await threads.resolve(given as ThreadId | undefined, input.ctx);
     const fresh = thread.messages.length === 0;
-    const priorFileUrls = new Set(
-      input.message.parts.flatMap((part) => part.type === "file" ? [part.url] : []),
-    );
     const message = await rehomeStagedFiles(input.message, thread.id, input.ctx);
     validateUpsert(thread.messages, message);
     const assistant: UIMessage = {
@@ -644,9 +686,14 @@ export function createHarnessTurns(config: HarnessTurnsConfig): HarnessTurns {
       role: "assistant",
       parts: [limitCardPart(verdict) as UIMessage["parts"][number]],
     };
-    const homed = message.parts.flatMap((part) =>
-      part.type === "file" && !priorFileUrls.has(part.url) ? [part.url] : [],
-    );
+    const homes = new Map<string, string>();
+    for (let i = 0; i < input.message.parts.length; i++) {
+      const before = input.message.parts[i];
+      const after = message.parts[i];
+      if (before?.type === "file" && after?.type === "file" && before.url !== after.url) {
+        homes.set(before.url, after.url);
+      }
+    }
     // `persist` is the pair write (CAS of the whole transcript). `upsertMany`
     // is used only where that verb is itself one transaction — a SQL store, or
     // a mount that serves `transcripts.appendMessages`. A turn-capable store
@@ -670,7 +717,7 @@ export function createHarnessTurns(config: HarnessTurnsConfig): HarnessTurns {
         );
       }
     } catch (error) {
-      await dropHomedFiles(homed, input.ctx);
+      await dropHomedFiles(homes, input.ctx);
       throw error;
     }
     return thread.id;
